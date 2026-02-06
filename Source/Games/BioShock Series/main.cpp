@@ -199,6 +199,7 @@ public:
       {
          game_shader_defines_data.push_back({ "GAME_BIOSHOCK", '3', true, true });
          game_shader_defines_data.push_back({ "XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4 });
+         game_shader_defines_data.push_back({ "DISABLE_LENS_DIRT", '0', true, false, "Disables lens dirt.", 1 });
       }
 
       shader_defines_data.append_range(game_shader_defines_data);
