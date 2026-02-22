@@ -611,7 +611,7 @@ public:
                settings_data.render_height = dlss_render_resolution[1];
                settings_data.dynamic_resolution = game_device_data.prey_drs_detected;
                settings_data.hdr = true; // The "HDR" flag in DLSS SR actually means whether the color is in linear space or "sRGB gamma" (apparently not 2.2) (SDR) space, colors beyond 0-1 don't seem to be clipped either way
-               settings_data.inverted_depth = false;
+               settings_data.inverted_depth = true;
                settings_data.mvs_jittered = false;
                settings_data.render_preset = dlss_render_preset;
                sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
@@ -936,7 +936,7 @@ public:
             settings_data.render_height = dlss_render_resolution[1];
             settings_data.dynamic_resolution = game_device_data.prey_drs_detected;
             settings_data.hdr = true; // The "HDR" flag in DLSS SR actually means whether the color is in linear space or "sRGB gamma" (apparently not 2.2) (SDR) space, colors beyond 0-1 don't seem to be clipped either way
-            settings_data.inverted_depth = false;
+            settings_data.inverted_depth = true;
             settings_data.mvs_jittered = false;
             settings_data.render_preset = dlss_render_preset;
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context.get(), settings_data);
