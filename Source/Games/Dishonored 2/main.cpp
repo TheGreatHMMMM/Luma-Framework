@@ -56,6 +56,7 @@ namespace
    ShaderHashesList shader_hashes_DownsampleDepth;
    ShaderHashesList shader_hashes_UnprojectDepth;
    ShaderHashesList shader_hashes_SSAO;
+   ShaderHashesList shader_hashes_Downsample;
 
    // XeGTAO
    constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
@@ -553,6 +554,11 @@ public:
          {
             device_data.has_drawn_main_post_processing = true;
          }
+      }
+
+      if (original_shader_hashes.Contains(shader_hashes_Downsample))
+      {
+         native_device_context->PSSetConstantBuffers(3, 1, &game_device_data.cb_taa_b2);
       }
 
       if (original_shader_hashes.Contains(shader_hashes_TAA))
@@ -1198,6 +1204,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_UnprojectDepth.compute_shaders.emplace(std::stoul("223FB9DA", nullptr, 16)); // DH2
       shader_hashes_UnprojectDepth.compute_shaders.emplace(std::stoul("74E15FB8", nullptr, 16)); // DH DOTO
       shader_hashes_SSAO.pixel_shaders.emplace(0x94445D2D); // DH2 + DH DOTO
+      shader_hashes_Downsample.pixel_shaders.emplace(0x42873B15);
       // All UI pixel shaders (these are all Shader Model 4.0, as opposed to the rest of the rendering using SM5.0)
       shader_hashes_UI.pixel_shaders = {
          std::stoul("6FE8114D", nullptr, 16),
