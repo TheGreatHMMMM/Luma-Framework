@@ -25,7 +25,7 @@ struct CBPerViewGlobals
    Matrix44F cb_previousprojectionmatrix;
    float4 cb_mousecursorposition;
    float4 cb_mousebuttonsdown;
-   // xy and the jitter offsets in uv space (y is flipped), zw might be the same in another space or the ones from the previous frame
+   // Jitters in UV space (not Halton, R2, or Sobol. Custom sequence?). xy current frame, zw previous frame.
    float4 cb_jittervectors;
    Matrix44F cb_inverseviewprojectionmatrix;
    Matrix44F cb_inverseviewmatrix;
@@ -102,11 +102,8 @@ struct GameDeviceDataDishonored2 final : public GameDeviceData
    com_ptr<ID3D11Resource> sr_source_color;
    com_ptr<ID3D11Resource> sr_motion_vectors;
    //com_ptr<ID3D11Texture2D> sr_output_color_2; //TODOFT: delete this and related code
-   ComPtr<ID3D11Texture2D> sr_exposure;
 
-   // We need these to get exposure.
    ComPtr<ID3D11Buffer> cb_taa_b2;
-   ComPtr<ID3D11ShaderResourceView> srv_postfx_luminance_autoexposure;
 
    // Game state
    com_ptr<ID3D11Resource> depth_buffer;
@@ -161,7 +158,6 @@ public:
 
       native_shaders_definitions.emplace(CompileTimeStringHash("DS2 XeGTAO Prefilter Depths CS"), ShaderDefinition{ "Luma_XeGTAO", reshade::api::pipeline_subobject_type::compute_shader, nullptr, "prefilter_depths16x16_cs" });
       native_shaders_definitions.emplace(CompileTimeStringHash("DS2 XeGTAO Main Pass PS"), ShaderDefinition{ "Luma_XeGTAO", reshade::api::pipeline_subobject_type::pixel_shader, nullptr, "main_pass_ps" });
-      native_shaders_definitions.emplace(CompileTimeStringHash("DS2 Exposure CS"), ShaderDefinition{ "Luma_Exposure", reshade::api::pipeline_subobject_type::compute_shader });
    }
 
    // This needs to be overridden with your own "GameDeviceData" sub-class (destruction is automatically handled)
@@ -589,7 +585,6 @@ public:
       if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && original_shader_hashes.Contains(shader_hashes_TAA))
       {
          native_device_context->CSGetConstantBuffers(2, 1, game_device_data.cb_taa_b2.put());
-         native_device_context->CSGetShaderResources(3, 1, game_device_data.srv_postfx_luminance_autoexposure.put());
 
          // TODO: Clean up all this, I think game will always use deferred rendering, so most of this is not needed.
          assert(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED);
@@ -953,41 +948,6 @@ public:
 
             // Do "delayed" DLSS:
 
-            // First we get exposure to 2D texture 1x1.
-            //
-
-            ComPtr<ID3D11Device> native_device;
-            native_device_context->GetDevice(native_device.put());
-
-            // Create RTs and views.
-            if (!game_device_data.sr_exposure) {
-                D3D11_TEXTURE2D_DESC tex_desc = {};
-		        tex_desc.Width = 1;
-		        tex_desc.Height = 1;
-		        tex_desc.MipLevels = 1;
-		        tex_desc.ArraySize = 1;
-		        tex_desc.Format = DXGI_FORMAT_R32_FLOAT;
-		        tex_desc.SampleDesc.Count = 1;
-		        tex_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-		        ensure(native_device->CreateTexture2D(&tex_desc, nullptr, game_device_data.sr_exposure.put()), >= 0);
-            }
-		    ComPtr<ID3D11UnorderedAccessView> uav;
-		    ensure(native_device->CreateUnorderedAccessView(game_device_data.sr_exposure.get(), nullptr, uav.put()), >= 0);
-
-            // Bindings.
-		    native_device_context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-		    native_device_context->CSSetShader(device_data.native_compute_shaders.at(CompileTimeStringHash("DS2 Exposure CS")).get(), nullptr, 0);
-		    native_device_context->CSSetConstantBuffers(0, 1, &game_device_data.cb_taa_b2);
-		    native_device_context->CSSetShaderResources(0, 1, &game_device_data.srv_postfx_luminance_autoexposure);
-
-		    native_device_context->Dispatch(1, 1, 1);
-
-            // Ubind UAV.
-		    ID3D11UnorderedAccessView* uav_null = nullptr;
-		    native_device_context->CSSetUnorderedAccessViews(0, 1, &uav_null, nullptr);
-
-            //
-
             DrawStateStack<DrawStateStackType::FullGraphics> draw_state_stack;
             DrawStateStack<DrawStateStackType::Compute> compute_state_stack;
             draw_state_stack.Cache(native_device_context.get(), device_data.uav_max_count);
@@ -1007,6 +967,7 @@ public:
             settings_data.inverted_depth = true;
             settings_data.mvs_jittered = false;
             settings_data.render_preset = dlss_render_preset;
+            settings_data.auto_exposure = true;
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context.get(), settings_data);
 
             bool reset_dlss = device_data.force_reset_sr;
@@ -1021,7 +982,7 @@ public:
             draw_data.output_color = device_data.sr_output_color.get();
             draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
             draw_data.depth_buffer = game_device_data.depth_buffer.get();
-            draw_data.exposure = game_device_data.sr_exposure.get();
+            draw_data.exposure = nullptr;
             draw_data.pre_exposure = dlss_pre_exposure;
             draw_data.jitter_x = projection_jitters.x;
             draw_data.jitter_y = projection_jitters.y;
