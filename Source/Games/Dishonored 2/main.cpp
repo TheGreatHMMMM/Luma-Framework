@@ -25,7 +25,7 @@ struct CBPerViewGlobals
    Matrix44F cb_previousprojectionmatrix;
    float4 cb_mousecursorposition;
    float4 cb_mousebuttonsdown;
-   // xy and the jitter offsets in uv space (y is flipped), zw might be the same in another space or the ones from the previous frame
+   // Jitters in UV space (not Halton, R2, or Sobol. Custom sequence?). xy current frame, zw previous frame.
    float4 cb_jittervectors;
    Matrix44F cb_inverseviewprojectionmatrix;
    Matrix44F cb_inverseviewmatrix;
@@ -56,6 +56,7 @@ namespace
    ShaderHashesList shader_hashes_DownsampleDepth;
    ShaderHashesList shader_hashes_UnprojectDepth;
    ShaderHashesList shader_hashes_SSAO;
+   ShaderHashesList shader_hashes_Downsample;
 
    // XeGTAO
    constexpr size_t XE_GTAO_DEPTH_MIP_LEVELS = 5;
@@ -98,6 +99,8 @@ struct GameDeviceDataDishonored2 final : public GameDeviceData
    com_ptr<ID3D11Resource> sr_source_color;
    com_ptr<ID3D11Resource> sr_motion_vectors;
    //com_ptr<ID3D11Texture2D> sr_output_color_2; //TODOFT: delete this and related code
+
+   ComPtr<ID3D11Buffer> cb_taa_b2;
 
    // Game state
    com_ptr<ID3D11Resource> depth_buffer;
@@ -146,6 +149,7 @@ public:
 
       std::vector<ShaderDefineData> game_shader_defines_data = {
          { "XE_GTAO_QUALITY", '2', true, false, "0 - Low\n1 - Medium\n2 - High\n3 - Very High\n4 - Ultra", 4 },
+         { "DISABLE_LENS_DISTORTION", '0', true, false, "Disable lens distortion while running or ducked.", 1 }
       };
 
       shader_defines_data.append_range(game_shader_defines_data);
@@ -549,6 +553,13 @@ public:
          }
       }
 
+      if (original_shader_hashes.Contains(shader_hashes_Downsample))
+      {
+         native_device_context->PSSetConstantBuffers(3, 1, &game_device_data.cb_taa_b2);
+
+         return DrawOrDispatchOverrideType::None;
+      }
+
       if (original_shader_hashes.Contains(shader_hashes_TAA))
       {
          // Not thread safe?
@@ -561,6 +572,11 @@ public:
       // SR/TAA
       if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed && original_shader_hashes.Contains(shader_hashes_TAA))
       {
+         native_device_context->CSGetConstantBuffers(2, 1, game_device_data.cb_taa_b2.put());
+
+         // TODO: Clean up all this, I think game will always use deferred rendering, so most of this is not needed.
+         assert(native_device_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED);
+
          com_ptr<ID3D11ShaderResourceView> srvs[2]; // TODO: rename
          // 1 motion vectors
          // 2 color source (pre TAA, jittered)
@@ -611,7 +627,7 @@ public:
                settings_data.render_height = dlss_render_resolution[1];
                settings_data.dynamic_resolution = game_device_data.prey_drs_detected;
                settings_data.hdr = true; // The "HDR" flag in DLSS SR actually means whether the color is in linear space or "sRGB gamma" (apparently not 2.2) (SDR) space, colors beyond 0-1 don't seem to be clipped either way
-               settings_data.inverted_depth = false;
+               settings_data.inverted_depth = true;
                settings_data.mvs_jittered = false;
                settings_data.render_preset = dlss_render_preset;
                sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
@@ -701,8 +717,8 @@ public:
                   // Theoretically knowing the average exposure of the frame would still be beneficial to it (somehow) so maybe we could simply let the auto exposure in,
                   D3D11_SUBRESOURCE_DATA exposure_texture_data;
                   exposure_texture_data.pSysMem = &sr_scene_exposure; // This needs to be "static" data in case the texture initialization was somehow delayed and read the data after the stack destroyed it
-                  exposure_texture_data.SysMemPitch = 32;
-                  exposure_texture_data.SysMemSlicePitch = 32;
+                  exposure_texture_data.SysMemPitch = sizeof(float);
+                  exposure_texture_data.SysMemSlicePitch = sizeof(float);
 
                   device_data.sr_exposure = nullptr; // Make sure we discard the previous one
                   hr = native_device->CreateTexture2D(&exposure_texture_desc, &exposure_texture_data, &device_data.sr_exposure);
@@ -929,6 +945,9 @@ public:
             ASSERT_ONCE(sr_instance_data);
 
             std::array<uint32_t, 2> dlss_render_resolution = FindClosestIntegerResolutionForAspectRatio((double)device_data.output_resolution.x * (double)device_data.sr_render_resolution_scale, (double)device_data.output_resolution.y * (double)device_data.sr_render_resolution_scale, (double)device_data.output_resolution.x / (double)device_data.output_resolution.y);
+            uint32_t render_width_dlss = std::lrintf(device_data.render_resolution.x);
+            uint32_t render_height_dlss = std::lrintf(device_data.render_resolution.y);
+
             SR::SettingsData settings_data;
             settings_data.output_width = device_data.output_resolution.x;
             settings_data.output_height = device_data.output_resolution.y;
@@ -936,16 +955,20 @@ public:
             settings_data.render_height = dlss_render_resolution[1];
             settings_data.dynamic_resolution = game_device_data.prey_drs_detected;
             settings_data.hdr = true; // The "HDR" flag in DLSS SR actually means whether the color is in linear space or "sRGB gamma" (apparently not 2.2) (SDR) space, colors beyond 0-1 don't seem to be clipped either way
-            settings_data.inverted_depth = false;
+            settings_data.inverted_depth = true;
             settings_data.mvs_jittered = false;
             settings_data.render_preset = dlss_render_preset;
+            settings_data.auto_exposure = true;
+
+            // MVs are in UV space so we need to scale them to screen space for DLSS,
+            // aslo we need to flip sign on both for DLSS.
+            settings_data.mvs_x_scale = -(float)render_width_dlss;
+            settings_data.mvs_y_scale = -(float)render_height_dlss;
+
             sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context.get(), settings_data);
 
             bool reset_dlss = device_data.force_reset_sr;
             device_data.force_reset_sr = false;
-
-            uint32_t render_width_dlss = std::lrintf(device_data.render_resolution.x);
-            uint32_t render_height_dlss = std::lrintf(device_data.render_resolution.y);
 
             float dlss_pre_exposure = 1.0;
             SR::SuperResolutionImpl::DrawData draw_data;
@@ -953,10 +976,14 @@ public:
             draw_data.output_color = device_data.sr_output_color.get();
             draw_data.motion_vectors = game_device_data.sr_motion_vectors.get();
             draw_data.depth_buffer = game_device_data.depth_buffer.get();
-            draw_data.exposure = device_data.sr_exposure.get();
+            draw_data.exposure = nullptr;
             draw_data.pre_exposure = dlss_pre_exposure;
-            draw_data.jitter_x = projection_jitters.x;
-            draw_data.jitter_y = projection_jitters.y;
+
+            // We need to swap jitters. Are they originally swapped or it's just DLSS things?
+            // Jitters are in UV offsets so we need to scale them to pixel offsets for DLSS.
+            draw_data.jitter_x = cb_per_view_global.cb_jittervectors.y * (float)render_height_dlss;
+            draw_data.jitter_y = cb_per_view_global.cb_jittervectors.x * (float)render_width_dlss;
+
             draw_data.reset = reset_dlss;
             draw_data.render_width = render_width_dlss;
             draw_data.render_height = render_height_dlss;
@@ -1151,6 +1178,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_UnprojectDepth.compute_shaders.emplace(std::stoul("223FB9DA", nullptr, 16)); // DH2
       shader_hashes_UnprojectDepth.compute_shaders.emplace(std::stoul("74E15FB8", nullptr, 16)); // DH DOTO
       shader_hashes_SSAO.pixel_shaders.emplace(0x94445D2D); // DH2 + DH DOTO
+      shader_hashes_Downsample.pixel_shaders.emplace(0x42873B15);
       // All UI pixel shaders (these are all Shader Model 4.0, as opposed to the rest of the rendering using SM5.0)
       shader_hashes_UI.pixel_shaders = {
          std::stoul("6FE8114D", nullptr, 16),
