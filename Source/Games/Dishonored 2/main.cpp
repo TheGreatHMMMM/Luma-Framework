@@ -1,6 +1,8 @@
 #define GAME_DISHONORED_2 1
 
 #define ENABLE_NGX 1
+#define ENABLE_FIDELITY_SK 1
+
 // Hangs on boot
 #define DISABLE_AUTO_DEBUGGER
 // Previously disabled as it made boot extremely slow, it should now be fine as we optimized the code
@@ -1009,6 +1011,10 @@ public:
             draw_data.reset = reset_dlss;
             draw_data.render_width = render_width_dlss;
             draw_data.render_height = render_height_dlss;
+            draw_data.vert_fov = std::atan(1.0f / projection_matrix.m11) * 2.0;
+            draw_data.near_plane = cb_per_view_global.cb_globalviewinfos.z;
+            draw_data.far_plane = cb_per_view_global.cb_globalviewinfos.w;
+            draw_data.frame_index = cb_luma_global_settings.FrameIndex;
 
             bool dlss_succeeded = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context.get(), draw_data);
             ASSERT_ONCE(dlss_succeeded); // We can't restore the original TAA pass at this point (well, we could, but it's pointless, we'll just skip one frame) // TODO: copy the resource instead?
