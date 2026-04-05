@@ -6212,8 +6212,8 @@ namespace
             {
                native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
          }
       }
@@ -6369,8 +6369,8 @@ namespace
             {
                native_device_context->VSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
          }
       }
@@ -6478,8 +6478,8 @@ namespace
          {
             com_ptr<ID3D11Buffer> cb;
             native_device_context->CSGetConstantBuffers(track_buffer_index, 1, &cb);
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
          }
       }
@@ -6661,8 +6661,8 @@ namespace
             {
                native_device_context->CSGetConstantBuffers(track_buffer_index, 1, &cb);
             }
-            // Copy the buffer in our data
-            CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data);
+            // Copy the buffer in our data, and make a copy if necessary, if we are in a deferred context
+            device_data.track_buffer_data.data_valid = CopyBuffer(cb, native_device_context, device_data.track_buffer_data.data, device_data.track_buffer_data.cb);
             device_data.track_buffer_data.hash = std::to_string(std::hash<void*>{}(cb.get()));
          }
       }
@@ -9584,8 +9584,7 @@ namespace
                   track_buffer_pipeline_target_instance = -1;
                   track_buffer_index = 0;
 
-                  device_data.track_buffer_data.hash.clear();
-                  device_data.track_buffer_data.data.clear();
+                  device_data.track_buffer_data.Clear();
                }
 
                highlighted_resource = "";
@@ -10497,7 +10496,17 @@ namespace
                                     {
                                        ImGui::SliderInt("Constant Buffer Tracked Index", &track_buffer_index, 0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT - 1);
 
-                                       if (!device_data.track_buffer_data.data.empty())
+                                       // Hacky way of retrieving the data if the tracked buffer was in a deferred command list and hence couldn't be mapped there
+                                       if (!device_data.track_buffer_data.data_valid && device_data.track_buffer_data.cb)
+                                       {
+                                          com_ptr<ID3D11DeviceContext> native_device_context;
+                                          HRESULT hr = draw_call_data.command_list->QueryInterface(&native_device_context);
+                                          D3D11_BUFFER_DESC desc = {};
+                                          device_data.track_buffer_data.cb->GetDesc(&desc);
+                                          device_data.track_buffer_data.data_valid = MapBufferData(device_data.track_buffer_data.cb, native_device_context.get(), device_data.track_buffer_data.data, desc.ByteWidth);
+                                       }
+
+                                       if (device_data.track_buffer_data.data_valid && !device_data.track_buffer_data.data.empty())
                                        {
                                           ImGui::NewLine();
                                           ImGui::Text("Tracked Constant Buffer:");
@@ -10560,8 +10569,7 @@ namespace
                                     // Hacky: clear the data here...
                                     else
                                     {
-                                       device_data.track_buffer_data.hash.clear();
-                                       device_data.track_buffer_data.data.clear();
+                                       device_data.track_buffer_data.Clear();
                                     }
                                  }
 

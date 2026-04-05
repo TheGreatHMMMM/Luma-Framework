@@ -419,7 +419,17 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
    struct TrackBufferData
    {
       std::string hash; // Resource ptr hash
+      bool data_valid = false;
       std::vector<float> data;
+      com_ptr<ID3D11Buffer> cb;
+
+      void Clear()
+      {
+         hash.clear();
+         data_valid = false;
+         data.clear();
+         cb.reset();
+      }
    };
    TrackBufferData track_buffer_data;
 #endif
