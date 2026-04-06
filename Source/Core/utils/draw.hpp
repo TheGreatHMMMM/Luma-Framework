@@ -617,7 +617,7 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
             if ((sampler_states[i] != nullptr || (show_used_unbound_resources && cached_shader->samplers[i])) && (show_unused_bound_resources || cached_shader->samplers[i]))
             {
                D3D11_SAMPLER_DESC desc = {};
-               desc.Filter = D3D11_FILTER(-1);
+               desc.Filter = D3D11_FILTER(-1); // TODO: walk back to the source sampler instead of the one luma possibly replaced?
                if (sampler_states[i]) sampler_states[i]->GetDesc(&desc);
                trace_draw_call_data.samplers_filter[i] = desc.Filter;
                trace_draw_call_data.samplers_address_u[i] = desc.AddressU;
