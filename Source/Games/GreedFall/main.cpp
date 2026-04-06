@@ -341,6 +341,19 @@ public:
       {
          device_data.force_reset_sr = true;
       }
+
+      if (!custom_texture_mip_lod_bias_offset)
+      {
+          std::shared_lock shared_lock_samplers(s_mutex_samplers);
+          if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
+          {
+              device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(device_data.render_resolution.y, device_data.output_resolution.y); // This results in -1 at output res
+          }
+          else
+          {
+              device_data.texture_mip_lod_bias_offset = 0.f;
+          }
+      }
    }
 
    void PrintImGuiAbout() override
