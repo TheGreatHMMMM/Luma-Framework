@@ -83,34 +83,13 @@ namespace
         VirtualProtect((void*)patch_addr, stolen_len, old_protect, &old_protect);
     }
 
-    // TODO: Replace this with precalculated values.
-    float Halton(int index, int base)
-    {
-        const int b = base;
-        int i = index;
-
-        float f = 1.0f;
-        float r = 0.0f;
- 
-        while (i > 0)
-        {
-            f /= (float)b;
-            r = r + f * (float)(i % b);
-            i /= b;
-        }
- 
-        return r;
-    }
-
     void JitterUpdate(bool enabled, float renderer_resolution_x, float renderer_resolution_y)
     {
         if (enabled)
         {
-            static uint32_t frame;
-            ++frame;
-            auto index = frame % 8;
-            g_jitters.x = (Halton(index + 1, 2) - 0.5f) / renderer_resolution_x;
-            g_jitters.y = (Halton(index + 1, 3) - 0.5f) / renderer_resolution_y;
+            auto index = cb_luma_global_settings.FrameIndex % 8;
+            g_jitters.x = SR::HaltonSequence(index, 2) / renderer_resolution_x;
+            g_jitters.y = SR::HaltonSequence(index, 3) / renderer_resolution_y;
         }
         else
         {
