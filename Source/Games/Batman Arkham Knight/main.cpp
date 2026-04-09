@@ -335,6 +335,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         forced_shader_names.emplace(0x42C0137E, "SMAANeighborhoodBlending");
         #endif
 
+        // TODO: Remove this later!
+        Globals::DEVELOPMENT_STATE = Globals::ModDevelopmentState::WorkInProgress;
+
         game = new BatmanArkhamKnight();
     }
 
