@@ -6947,8 +6947,11 @@ namespace
          return;
       // This only seems to happen when the game shuts down in Prey (as any destroy callback, it can be called from an arbitrary thread, but that's fine).
       // We don't need to check the custom samplers within the map even if they might be the same object, because they are strong pointers and thus wouldn't get destroyed if they were non null.
-      const std::unique_lock lock_samplers(s_mutex_samplers);
+      s_mutex_samplers.lock();
+      // Release custom samplers outside lock as OnDestroySampler can be called recursively
+      auto samplers = std::move(device_data.custom_sampler_by_original_sampler[sampler.handle]);
       device_data.custom_sampler_by_original_sampler.erase(sampler.handle);
+      s_mutex_samplers.unlock();
    }
 
    // Takes a view desc the game would have tried to use with a resource we upgraded (directly or indirectly),
