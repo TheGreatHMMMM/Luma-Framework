@@ -718,8 +718,6 @@ namespace
 
    thread_local reshade::api::command_list* thread_local_cmd_list = nullptr; // Hacky global variable (possibly not cleared, stale), only use to quickly tell the command list of the thread
 
-   std::unordered_map<const ID3D11InputLayout*, std::vector<D3D11_INPUT_ELEMENT_DESC>> input_layouts_descs;
-
    // Textures debug drawing
    namespace
    {
@@ -3383,6 +3381,8 @@ namespace
 #if DEVELOPMENT
          case reshade::api::pipeline_subobject_type::input_layout:
          {
+            DeviceData& device_data = *device->get_private_data<DeviceData>();
+            const std::unique_lock lock_device(device_data.mutex);
             for (uint32_t j = 0; j < subobject.count; ++j)
             {
                reshade::api::input_element* desc = reinterpret_cast<reshade::api::input_element*>(subobject.data) + j;
@@ -3399,7 +3399,7 @@ namespace
                   internal_desc.SemanticName = "TEXCOORD";
                   internal_desc.SemanticIndex = desc->location;
                }
-               input_layouts_descs[reinterpret_cast<ID3D11InputLayout*>(pipeline.handle)].push_back(internal_desc);
+               device_data.input_layouts_descs[reinterpret_cast<ID3D11InputLayout*>(pipeline.handle)].push_back(internal_desc);
             }
             return;
          }
@@ -4090,6 +4090,14 @@ namespace
             device_data.pipeline_cache_by_pipeline_handle.erase(pipeline_cache_pair);
          }
 
+#if DEVELOPMENT
+         {
+            // Note: this is optional, we don't need to remove them because they are "read only", with no strong references
+            const std::unique_lock lock_device(device_data.mutex);
+            device_data.input_layouts_descs.erase(reinterpret_cast<ID3D11InputLayout*>(pipeline.handle));
+         }
+#endif
+
          lock.unlock(); // Calls into the device could deadlock if the game rendering is multithreaded
          lock_pipeline_destroy.unlock(); // Unlock these two in reverse order!
 
@@ -4099,10 +4107,6 @@ namespace
             device->destroy_pipeline(reshade::api::pipeline{pipeline_to_destroy});
          }
       }
-
-#if DEVELOPMENT
-      input_layouts_descs.erase(reinterpret_cast<ID3D11InputLayout*>(pipeline.handle));
-#endif
    }
 
    void OnBindPipeline(
@@ -5484,14 +5488,14 @@ namespace
             ASSERT_ONCE(native_device_context);
             if (is_dispatch)
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, input_layouts_descs, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
             }
             else
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, input_layouts_descs, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
                if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0) // Somehow this can happen (e.g. query tests don't require pixel shaders)
                {
-                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, input_layouts_descs, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
                }
             }
          }
