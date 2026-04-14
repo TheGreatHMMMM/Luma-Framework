@@ -1003,13 +1003,14 @@ bool CopyBuffer(com_ptr<ID3D11Buffer> cb, ID3D11DeviceContext* native_device_con
    // Clone it if it can't be read by the CPU, or if we are in a deferred context as we won't be able to map the buffer
    if ((desc.CPUAccessFlags & D3D11_CPU_ACCESS_READ) == 0 || desc.Usage != D3D11_USAGE_STAGING || native_device_context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED)
    {
-      com_ptr<ID3D11Device> native_device;
       desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
       desc.Usage = D3D11_USAGE_STAGING;
       desc.BindFlags = 0;
       desc.MiscFlags = 0; // Some flags might be incompatible with staging
       desc.StructureByteStride = 0; // Must be zero for safety, as we cleared "D3D11_RESOURCE_MISC_BUFFER_STRUCTURED"
 
+      com_ptr<ID3D11Device> native_device;
+      native_device_context->GetDevice(&native_device);
       HRESULT hr = native_device->CreateBuffer(&desc, nullptr, &cb_copy);
       if (FAILED(hr))
       {

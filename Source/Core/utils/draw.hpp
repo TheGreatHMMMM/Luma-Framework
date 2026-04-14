@@ -329,7 +329,7 @@ struct DrawStateStack
 #if DEVELOPMENT
 // Expects mutexes to already be locked
 void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data, const DeviceData& device_data, ID3D11DeviceContext* native_device_context, uint64_t pipeline_handle,
-   std::unordered_map<uint32_t, CachedShader*>& shader_cache, const std::unordered_map<const ID3D11InputLayout*, std::vector<D3D11_INPUT_ELEMENT_DESC>>& input_layouts_descs, const DrawDispatchData& draw_dispatch_data, std::unordered_map<uint64_t, uint64_t> mirrored_rvs_redirector)
+   std::unordered_map<uint32_t, CachedShader*>& shader_cache, const DrawDispatchData& draw_dispatch_data, std::unordered_map<uint64_t, uint64_t> mirrored_rvs_redirector)
 {
    TraceDrawCallData trace_draw_call_data;
 
@@ -674,9 +674,9 @@ void AddTraceDrawCallData(std::vector<TraceDrawCallData>& trace_draw_calls_data,
          trace_draw_call_data.input_layout_hash = std::to_string(std::hash<void*>{}(input_layout.get()));
 
          //TODOFT5: do multiple of these! And print more data, and find the right vertex buffer
-         if (input_layouts_descs.contains(input_layout.get()))
+         if (device_data.input_layouts_descs.contains(input_layout.get()))
          {
-            const auto& input_elements_descs = input_layouts_descs.find(input_layout.get());
+            const auto& input_elements_descs = device_data.input_layouts_descs.find(input_layout.get());
             for (size_t i = 0; i < input_elements_descs->second.size(); i++)
             {
                com_ptr<ID3D11Buffer> vertex_buffer;

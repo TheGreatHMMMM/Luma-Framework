@@ -1162,13 +1162,11 @@ public:
    }
 };
 
-// This is where everything starts from, the very first call to the dll.
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
    if (ul_reason_for_call == DLL_PROCESS_ATTACH)
    {
-      //name
-      Globals::SetGlobals(PROJECT_NAME, "Call of Duty: Black Ops 3 - Luma");
+      Globals::SetGlobals(PROJECT_NAME, "Call of Duty: Black Ops III - Luma");
       Globals::VERSION = 1;
 
       //SetupShaderHashesLists

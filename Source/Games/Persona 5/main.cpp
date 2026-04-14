@@ -14,7 +14,7 @@ enum class FramePhase
    LIGHTING,
    DEFERRED,
    POSTPROCESSING_AND_UI,
-   UI
+   UI_ONLY
 };
 
 struct ReplacementTexture
@@ -45,6 +45,11 @@ namespace
    ShaderHashesList shader_hashes_bloom_select;
    ShaderHashesList shader_hashes_bloom_filter;
    ShaderHashesList shader_hashes_copy;
+   ShaderHashesList shader_hashes_fxaa;
+   ShaderHashesList shader_hashes_smaa_edge_detection;
+   ShaderHashesList shader_hashes_smaa_weight_calculation;
+   ShaderHashesList shader_hashes_smaa_blending;
+   ShaderHashesList shader_hashes_ui;
    uint32_t hash_identity = 0;
 } // namespace
 
@@ -150,12 +155,12 @@ public:
       auto& game_device_data = GetGameDeviceData(device_data);
       {
          D3D11_BUFFER_DESC bd;
-         bd.ByteWidth = 208;
+         bd.ByteWidth = 80;
          bd.Usage = D3D11_USAGE_DEFAULT;
          bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
          bd.CPUAccessFlags = 0;
          bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-         bd.StructureByteStride = 208;
+         bd.StructureByteStride = 80;
          native_device->CreateBuffer(&bd, nullptr, &game_device_data.scratch_constant_buffer);
       }
 
@@ -588,6 +593,11 @@ public:
 
       if (game_device_data.frame_phase == FramePhase::SHADOW_MAP)
       {
+         if (original_shader_hashes.Contains(shader_hashes_ui))
+         {
+            game_device_data.frame_phase = FramePhase::UI_ONLY;
+            return DrawOrDispatchOverrideType::None;
+         }
          if (!game_device_data.render_target_changed)
          {
             return DrawOrDispatchOverrideType::None;
@@ -792,6 +802,32 @@ public:
          }
       }
 
+      if (SrActive(device_data) &&
+          (original_shader_hashes.Contains(shader_hashes_fxaa) ||
+             original_shader_hashes.Contains(shader_hashes_smaa_blending)))
+      {
+         com_ptr<ID3D11ShaderResourceView> srv;
+         native_device_context->PSGetShaderResources(0, 4, &srv);
+         com_ptr<ID3D11RenderTargetView> rtv;
+         native_device_context->OMGetRenderTargets(1, &rtv, nullptr);
+
+         com_ptr<ID3D11Resource> srv_resource;
+         srv->GetResource(&srv_resource);
+
+         com_ptr<ID3D11Resource> rtv_resource;
+         rtv->GetResource(&rtv_resource);
+
+         native_device_context->CopySubresourceRegion(rtv_resource.get(), 0, 0, 0, 0, srv_resource.get(), 0, nullptr);
+
+         return DrawOrDispatchOverrideType::Skip;
+      }
+      else if (SrActive(device_data) &&
+               (original_shader_hashes.Contains(shader_hashes_smaa_edge_detection) ||
+                  original_shader_hashes.Contains(shader_hashes_smaa_weight_calculation)))
+      {
+         return DrawOrDispatchOverrideType::Skip;
+      }
+
       return DrawOrDispatchOverrideType::None;
    }
 
@@ -827,7 +863,8 @@ public:
          std::shared_lock shared_lock_samplers(s_mutex_samplers);
          if (SrActive(device_data) &&
              game_device_data.render_resolution.y > 0.0f &&
-             game_device_data.target_resolution.y > 0.0f)
+             game_device_data.target_resolution.y > 0.0f &&
+             game_device_data.render_resolution.x != 3840.0f) // upgrading samplers break mip based effect at 4K
          {
             device_data.texture_mip_lod_bias_offset = SR::GetMipLODBias(game_device_data.render_resolution.y, game_device_data.target_resolution.y); // This results in -1 at output res
          }
@@ -981,7 +1018,10 @@ public:
                   native_device_context->Dispatch((game_device_data.target_resolution.x + 7) / 8, (game_device_data.target_resolution.y + 7) / 8, 1);
                }
 
-               native_device_context->CopySubresourceRegion(game_device_data.source_color.get(), 0, 0, 0, 0, game_device_data.merged_texture.get(), 0, nullptr);
+               if (game_device_data.render_resolution == game_device_data.target_resolution)
+               {
+                  native_device_context->CopySubresourceRegion(game_device_data.source_color.get(), 0, 0, 0, 0, game_device_data.merged_texture.get(), 0, nullptr);
+               }
             }
          }
       }
@@ -1166,6 +1206,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       Globals::VERSION = 1;
 
       enable_samplers_upgrade = true;
+      samplers_upgrade_mode = 3;
 
       shader_hashes_light.pixel_shaders.emplace(std::stoul("D434C03A", nullptr, 16));
       shader_hashes_light.pixel_shaders.emplace(std::stoul("5C4DD977", nullptr, 16));
@@ -1182,6 +1223,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       shader_hashes_bloom_filter.pixel_shaders.emplace(std::stoul("526CA67C", nullptr, 16));
 
       shader_hashes_copy.pixel_shaders.emplace(std::stoul("B6E26AC7", nullptr, 16));
+
+      shader_hashes_fxaa.pixel_shaders.emplace(std::stoul("9EE7A272", nullptr, 16));
+
+      shader_hashes_smaa_edge_detection.pixel_shaders.emplace(std::stoul("BB722F0A", nullptr, 16));
+      shader_hashes_smaa_weight_calculation.pixel_shaders.emplace(std::stoul("4016ED43", nullptr, 16));
+      shader_hashes_smaa_blending.pixel_shaders.emplace(std::stoul("960502CC", nullptr, 16));
+
+      // not exhaustive but the first shader used in frames during which only the UI is active
+      shader_hashes_ui.pixel_shaders.emplace(std::stoul("5E008C96", nullptr, 16));
 
       // cbuffer slots are fairly spread out for compute shaders any slot from 2 upwards is free,
       // for pixel shaders 7 seem unused, for vertex shaders no slots are unused

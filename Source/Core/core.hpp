@@ -718,8 +718,6 @@ namespace
 
    thread_local reshade::api::command_list* thread_local_cmd_list = nullptr; // Hacky global variable (possibly not cleared, stale), only use to quickly tell the command list of the thread
 
-   std::unordered_map<const ID3D11InputLayout*, std::vector<D3D11_INPUT_ELEMENT_DESC>> input_layouts_descs;
-
    // Textures debug drawing
    namespace
    {
@@ -2547,12 +2545,12 @@ namespace
    // Prevent games from pausing when alt tabbing out of it (e.g. when editing shaders) by silencing focus loss events
    LRESULT WINAPI CustomWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
    {
-      if (lParam == WM_KILLFOCUS)
+      if (msg == WM_KILLFOCUS)
       {
          // Lost keyboard focus
          return 0; // block it
       }
-      else if (lParam == WM_ACTIVATE)
+      else if (msg == WM_ACTIVATE)
       {
          if (wParam == WA_INACTIVE)
          {
@@ -2772,7 +2770,7 @@ namespace
          if (window_changed)
          {
             game_window = swapchain_desc.OutputWindow; // This shouldn't really need any thread safety protection
-#if DEVELOPMENT //TODOFT: test/fix/finish
+#if DEVELOPMENT && !defined(DISABLE_FOCUS_LOSS_SUPPRESSION) //TODOFT: test/fix/finish
             if (game_window)
             {
 #if 1
@@ -3383,6 +3381,8 @@ namespace
 #if DEVELOPMENT
          case reshade::api::pipeline_subobject_type::input_layout:
          {
+            DeviceData& device_data = *device->get_private_data<DeviceData>();
+            const std::unique_lock lock_device(device_data.mutex);
             for (uint32_t j = 0; j < subobject.count; ++j)
             {
                reshade::api::input_element* desc = reinterpret_cast<reshade::api::input_element*>(subobject.data) + j;
@@ -3399,7 +3399,7 @@ namespace
                   internal_desc.SemanticName = "TEXCOORD";
                   internal_desc.SemanticIndex = desc->location;
                }
-               input_layouts_descs[reinterpret_cast<ID3D11InputLayout*>(pipeline.handle)].push_back(internal_desc);
+               device_data.input_layouts_descs[reinterpret_cast<ID3D11InputLayout*>(pipeline.handle)].push_back(internal_desc);
             }
             return;
          }
@@ -4090,6 +4090,14 @@ namespace
             device_data.pipeline_cache_by_pipeline_handle.erase(pipeline_cache_pair);
          }
 
+#if DEVELOPMENT
+         {
+            // Note: this is optional, we don't need to remove them because they are "read only", with no strong references
+            const std::unique_lock lock_device(device_data.mutex);
+            device_data.input_layouts_descs.erase(reinterpret_cast<ID3D11InputLayout*>(pipeline.handle));
+         }
+#endif
+
          lock.unlock(); // Calls into the device could deadlock if the game rendering is multithreaded
          lock_pipeline_destroy.unlock(); // Unlock these two in reverse order!
 
@@ -4099,10 +4107,6 @@ namespace
             device->destroy_pipeline(reshade::api::pipeline{pipeline_to_destroy});
          }
       }
-
-#if DEVELOPMENT
-      input_layouts_descs.erase(reinterpret_cast<ID3D11InputLayout*>(pipeline.handle));
-#endif
    }
 
    void OnBindPipeline(
@@ -5484,14 +5488,14 @@ namespace
             ASSERT_ONCE(native_device_context);
             if (is_dispatch)
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, input_layouts_descs, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_compute_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
             }
             else
             {
-               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, input_layouts_descs, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+               AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_vertex_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
                if (cmd_list_data.pipeline_state_original_pixel_shader.handle != 0) // Somehow this can happen (e.g. query tests don't require pixel shaders)
                {
-                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, input_layouts_descs, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
+                  AddTraceDrawCallData(cmd_list_data.trace_draw_calls_data, device_data, native_device_context, cmd_list_data.pipeline_state_original_pixel_shader.handle, shader_cache, last_draw_dispatch_data, device_data.original_resource_views_to_mirrored_upgraded_resource_views);
                }
             }
          }
@@ -6769,7 +6773,7 @@ namespace
 
          desc.MaxAnisotropy = D3D11_REQ_MAXANISOTROPY;
 
-         if (samplers_upgrade_mode == 5) // Bruteforce the offset
+         if (samplers_upgrade_mode >= 5) // Bruteforce the offset
          {
             desc.MipLODBias = std::clamp(device_data.texture_mip_lod_bias_offset, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX); // Setting this out of range (~ +/- 16) will make DX11 crash
          }
@@ -6777,6 +6781,15 @@ namespace
          {
             desc.MipLODBias = std::clamp(desc.MipLODBias + device_data.texture_mip_lod_bias_offset, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX); // Setting this out of range (~ +/- 16) will make DX11 crash
          }
+         else if (samplers_upgrade_mode == 3) // TODO: Remove once mip based effects in Persona 5 are fixed 
+         {
+             desc.MipLODBias = (desc.MipLODBias == 0.0f) ? desc.MipLODBias + device_data.texture_mip_lod_bias_offset : desc.MipLODBias;
+             desc.MipLODBias = std::clamp(desc.MipLODBias, D3D11_MIP_LOD_BIAS_MIN, D3D11_MIP_LOD_BIAS_MAX); // Setting this out of range (~ +/- 16) will make DX11 crash
+         }
+
+         float bias_difference = desc.MipLODBias - original_desc.MipLODBias;
+         desc.MinLOD = max(desc.MinLOD + min(bias_difference, 0.f), 0.f);
+
          // TODO: Clean up the code. Other "samplers_upgrade_mode" values aren't supported outside of development (because they aren't even needed, until proven otherwise)
       }
       else
@@ -6848,7 +6861,12 @@ namespace
          }
          if (samplers_upgrade_mode >= 6)
          {
-            desc.MinLOD = min(desc.MinLOD, 0.f);
+            desc.MinLOD = 0.f;
+         }
+         else
+         {
+            float bias_difference = desc.MipLODBias - original_desc.MipLODBias;
+            desc.MinLOD = max(desc.MinLOD + min(bias_difference, 0.f), 0.f);
          }
       }
 #endif // !DEVELOPMENT
@@ -6938,8 +6956,11 @@ namespace
          return;
       // This only seems to happen when the game shuts down in Prey (as any destroy callback, it can be called from an arbitrary thread, but that's fine).
       // We don't need to check the custom samplers within the map even if they might be the same object, because they are strong pointers and thus wouldn't get destroyed if they were non null.
-      const std::unique_lock lock_samplers(s_mutex_samplers);
+      s_mutex_samplers.lock();
+      // Release custom samplers outside lock as OnDestroySampler can be called recursively
+      auto samplers = std::move(device_data.custom_sampler_by_original_sampler[sampler.handle]);
       device_data.custom_sampler_by_original_sampler.erase(sampler.handle);
+      s_mutex_samplers.unlock();
    }
 
    // Takes a view desc the game would have tried to use with a resource we upgraded (directly or indirectly),
@@ -7969,7 +7990,7 @@ namespace
 #if DEVELOPMENT && 0
                // If recursive (already cloned) sampler ptrs are set, it's either because:
                // - the game created the same sampler as one of our upgraded ones, and in DX11 state objects used a shared pool memory so if you try to create two with the same desc, it returns the previously created one
-               // - the game somehow got the pointers (e.g. DX get samples functions) and is re-using them
+               // - the game somehow got the Luma upgraded samplers pointers (e.g. DX get samples functions) and is re-using them
                // this seems to happen when we change the ImGui settings for samplers a lot and quickly in Prey. It also happens in Mafia III and BioShock 2 Remastered. It shouldn't really hurt as they don't pass through the same init function.
                bool recursive_or_null = sampler.handle == 0;
                for (const auto& samplers_handle : device_data.custom_sampler_by_original_sampler)

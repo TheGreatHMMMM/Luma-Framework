@@ -394,6 +394,10 @@ struct __declspec(uuid("cfebf6d4-d184-4e1a-ac14-09d088e560ca")) DeviceData
    std::unordered_map<uint32_t, com_ptr<ID3D11PixelShader>> native_pixel_shaders;
    std::unordered_map<uint32_t, com_ptr<ID3D11ComputeShader>> native_compute_shaders;
 
+#if DEVELOPMENT
+   std::unordered_map<const ID3D11InputLayout*, std::vector<D3D11_INPUT_ELEMENT_DESC>> input_layouts_descs;
+#endif
+
    // Native Shaders Resources
    com_ptr<ID3D11Texture2D> temp_copy_source_texture;
    com_ptr<ID3D11Texture2D> temp_copy_target_texture;
