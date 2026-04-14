@@ -1,0 +1,22 @@
+#ifndef LUMA_GAME_CB_STRUCTS
+#define LUMA_GAME_CB_STRUCTS
+
+#ifdef __cplusplus
+#include "../../../Source/Core/includes/shader_types.h"
+#endif
+
+namespace CB
+{
+	struct LumaGameSettings
+	{
+		float Dummy;
+	};
+
+	struct LumaGameData
+	{
+		float2 CurrJitters;
+		float2 PrevJitters;
+	};
+}
+
+#endif // LUMA_GAME_CB_STRUCTS
