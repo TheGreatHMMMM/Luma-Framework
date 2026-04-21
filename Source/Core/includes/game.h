@@ -65,6 +65,8 @@ public:
    virtual void UpdateLumaInstanceDataCB(CB::LumaInstanceDataPadded& data, CommandListData& cmd_list_data, DeviceData& device_data) {}
    // Retrieves the game's "global" (main, per view, ...) cbuffer data
    virtual bool UpdateGlobalCB(const void* global_buffer_data_ptr, reshade::api::device* device) { return false; }
+   // Allows games to further narrow generic texture format upgrades on actual resource creation.
+   virtual bool FilterUpgradeResource(const reshade::api::resource_desc& desc, DeviceData& device_data, bool has_initial_data) { return true; }
 
    // Load ReShade configs on boot
    virtual void LoadConfigs() {}

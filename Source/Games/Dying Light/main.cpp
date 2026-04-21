@@ -5,6 +5,8 @@
 // DRM (Steam) may interfere with auto-debugger attachment
 #define DISABLE_AUTO_DEBUGGER 1
 
+#define DISABLE_FOCUS_LOSS_SUPPRESSION 1
+
 #define ENABLE_NGX 1
 
 #include "../../../Shaders/Dying Light/Includes/GameCBuffers.hlsl"
@@ -15,6 +17,7 @@ namespace
    std::set<reshade::api::format> toggleable_texture_upgrade_formats;
 
    ShaderHashesList shader_hashes_TAA;             // 0xA67ABF78 – SMAA T2X pass
+   ShaderHashesList shader_hashes_MV;              // 0x923B088C – motion vector pass; t0 is the scene depth buffer
 
    bool has_drawn_taa = false;
 
@@ -48,39 +51,28 @@ namespace
    uintptr_t camStructBase   = 0;
    uint8_t*  cam_hook_memory = nullptr;
 
-   uintptr_t jitterTableAddr = 0;
-   float     originalJitterTable[4] = {};
-   bool      jitterTableOverridden  = false;
+   volatile float g_pixel_jitter_x = 0.f;
+   volatile float g_pixel_jitter_y = 0.f;
+   uint8_t* jitter_hook_memory = nullptr;
+
+   static constexpr int kHaltonCount = 8;
+   alignas(8) float g_halton_table[kHaltonCount * 2] = {};
+   uint32_t         g_frame_index   = 0;
+
+   void InitHaltonTable()
+   {
+      for (int i = 0; i < kHaltonCount; ++i)
+      {
+         g_halton_table[i * 2 + 0] = SR::HaltonSequence(i + 1, 2);
+         g_halton_table[i * 2 + 1] = SR::HaltonSequence(i + 1, 3);
+      }
+   }
 
    CameraStruct* GetCamera()
    {
       if (!camStructBase)
          return nullptr;
       return reinterpret_cast<CameraStruct*>(camStructBase + 0x7CE0);
-   }
-
-   // ended up having to patch the jitter table instead of going through the projection matrix due to flickering
-   void PatchJitterTable()
-   {
-      if (!jitterTableAddr) return;
-      float* table = reinterpret_cast<float*>(jitterTableAddr);
-      if (!jitterTableOverridden)
-      {
-         memcpy(originalJitterTable, table, sizeof(originalJitterTable));
-         jitterTableOverridden = true;
-      }
-      table[0] = frame_jitters.x;  // slot 0 X
-      table[1] = frame_jitters.y;  // slot 0 Y
-      table[2] = frame_jitters.x;  // slot 1 X
-      table[3] = frame_jitters.y;  // slot 1 Y
-   }
-
-   void RestoreJitterTable()
-   {
-      if (!jitterTableAddr || !jitterTableOverridden) return;
-      float* table = reinterpret_cast<float*>(jitterTableAddr);
-      memcpy(table, originalJitterTable, sizeof(originalJitterTable));
-      jitterTableOverridden = false;
    }
 
    // hook from z1rp
@@ -94,8 +86,6 @@ namespace
       const uintptr_t baseAddr  = (uintptr_t)engineModule;
       const uintptr_t patchAddr = baseAddr + 0x75F3CB;
       const uintptr_t retAddr   = patchAddr + stolenLen;
-
-      jitterTableAddr = baseAddr + 0xA14C90;
 
       cam_hook_memory = (uint8_t*)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
       if (!cam_hook_memory)
@@ -150,10 +140,131 @@ namespace
 
       return true;
    }
+
+   // Mid-function hook at engine+0x75E0AF that REPLACES the SMAA T2X 2-sample
+   // jitter pattern with a Halton(2,3) sequence. The function reads:
+   //
+   //   lea   rax, [rip + jitter_table]   ; engine+0xA14C90 = {+.25,-.25,-.25,+.25}
+   //   movss xmm6, [rax + rcx*8]         ; rcx = frame & 1; xmm6 = pixel jitter X
+   //   movss xmm7, [rax + rcx*8 + 4]     ;                  xmm7 = pixel jitter Y
+   //   mov   rax, [rbx + 0x1010]
+   //
+   // We hook the 18 bytes covering all three. Instead of replaying the engine's
+   // table read, we synthesize xmm6/xmm7 from g_halton_table[g_frame_index] and
+   // mirror them to g_pixel_jitter_x/y. The engine then jitters its projection
+   // matrix with Halton, and DLSS receives the matching pixel jitter -- both
+   // sides stay consistent.
+   bool InitJitterHook()
+   {
+      HMODULE engineModule = GetModuleHandleA("engine_x64_rwdi.dll");
+      if (!engineModule)
+         return false;
+
+      InitHaltonTable();
+
+      constexpr size_t stolenLen = 18;  // 0x75E0AF .. 0x75E0C1
+      const uintptr_t baseAddr  = (uintptr_t)engineModule;
+      const uintptr_t patchAddr = baseAddr + 0x75E0AF;
+      const uintptr_t retAddr   = patchAddr + stolenLen;
+
+      static const uint8_t kExpected[stolenLen] = {
+         0xF3, 0x0F, 0x10, 0x34, 0xC8,                   // movss xmm6, [rax + rcx*8]
+         0xF3, 0x0F, 0x10, 0x7C, 0xC8, 0x04,             // movss xmm7, [rax + rcx*8 + 4]
+         0x48, 0x8B, 0x83, 0x10, 0x10, 0x00, 0x00,       // mov rax, [rbx + 0x1010]
+      };
+      if (memcmp((void*)patchAddr, kExpected, stolenLen) != 0)
+         return false;
+
+      jitter_hook_memory = (uint8_t*)VirtualAlloc(NULL, 128, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+      if (!jitter_hook_memory)
+         return false;
+
+      // Trampoline shellcode. Layout (rax/rcx are saved/restored):
+      //   push rax ; push rcx
+      //   mov   rax, &g_frame_index
+      //   mov   ecx, [rax]                ; idx
+      //   inc   dword ptr [rax]           ; advance for next frame
+      //   and   ecx, kHaltonCount-1       ; mask -> table index
+      //   mov   rax, &g_halton_table
+      //   movss xmm6, [rax + rcx*8]       ; Halton X (pixels)
+      //   movss xmm7, [rax + rcx*8 + 4]   ; Halton Y (pixels)
+      //   mov   rax, &g_pixel_jitter_x ; movss [rax], xmm6
+      //   mov   rax, &g_pixel_jitter_y ; movss [rax], xmm7
+      //   pop   rcx ; pop rax
+      //   mov   rax, [rbx + 0x1010]       ; replay last 7 stolen bytes
+      //   jmp   qword ptr [rip+0] ; abs64 retAddr
+      static_assert((kHaltonCount & (kHaltonCount - 1)) == 0, "kHaltonCount must be power of two");
+      static_assert(kHaltonCount <= 256, "AND immediate is 8-bit");
+
+      uint8_t shell[] = {
+         0x50,                                                  // push rax
+         0x51,                                                  // push rcx
+         0x48, 0xB8, 0,0,0,0,0,0,0,0,                           //  2: mov rax, &g_frame_index
+         0x8B, 0x08,                                            // 12: mov ecx, [rax]
+         0xFF, 0x00,                                            // 14: inc dword ptr [rax]
+         0x83, 0xE1, (uint8_t)(kHaltonCount - 1),               // 16: and ecx, mask
+         0x48, 0xB8, 0,0,0,0,0,0,0,0,                           // 19: mov rax, &g_halton_table
+         0xF3, 0x0F, 0x10, 0x34, 0xC8,                          // 29: movss xmm6, [rax + rcx*8]
+         0xF3, 0x0F, 0x10, 0x7C, 0xC8, 0x04,                    // 34: movss xmm7, [rax + rcx*8 + 4]
+         0x48, 0xB8, 0,0,0,0,0,0,0,0,                           // 40: mov rax, &g_pixel_jitter_x
+         0xF3, 0x0F, 0x11, 0x30,                                // 50: movss [rax], xmm6
+         0x48, 0xB8, 0,0,0,0,0,0,0,0,                           // 54: mov rax, &g_pixel_jitter_y
+         0xF3, 0x0F, 0x11, 0x38,                                // 64: movss [rax], xmm7
+         0x59,                                                  // 68: pop rcx
+         0x58,                                                  // 69: pop rax
+         0x48, 0x8B, 0x83, 0x10, 0x10, 0x00, 0x00,              // 70: mov rax, [rbx + 0x1010]
+         0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,                    // 77: jmp qword ptr [rip+0]
+         0,0,0,0,0,0,0,0,                                       // 83: abs64 retAddr
+      };
+      const uintptr_t pFrame  = (uintptr_t)&g_frame_index;
+      const uintptr_t pHalton = (uintptr_t)&g_halton_table[0];
+      const uintptr_t pJX     = (uintptr_t)&g_pixel_jitter_x;
+      const uintptr_t pJY     = (uintptr_t)&g_pixel_jitter_y;
+      memcpy(&shell[ 4], &pFrame,  sizeof(pFrame));
+      memcpy(&shell[21], &pHalton, sizeof(pHalton));
+      memcpy(&shell[42], &pJX,     sizeof(pJX));
+      memcpy(&shell[56], &pJY,     sizeof(pJY));
+      memcpy(&shell[83], &retAddr, sizeof(retAddr));
+
+      memcpy(jitter_hook_memory, shell, sizeof(shell));
+      FlushInstructionCache(GetCurrentProcess(), jitter_hook_memory, 128);
+
+      DWORD oldProtect;
+      if (!VirtualProtect((void*)patchAddr, stolenLen, PAGE_EXECUTE_READWRITE, &oldProtect))
+      {
+         VirtualFree(jitter_hook_memory, 0, MEM_RELEASE);
+         jitter_hook_memory = nullptr;
+         return false;
+      }
+
+      // Patch site: 14-byte JMP [RIP+0] + abs64 + 4 NOPs (stolenLen=18).
+      // Critical: this jump touches NO registers.
+      uint8_t patchBytes[stolenLen];
+      memset(patchBytes, 0x90, stolenLen);
+      patchBytes[0] = 0xFF;
+      patchBytes[1] = 0x25;
+      patchBytes[2] = 0x00;
+      patchBytes[3] = 0x00;
+      patchBytes[4] = 0x00;
+      patchBytes[5] = 0x00;
+      const uintptr_t shellAddr = (uintptr_t)jitter_hook_memory;
+      memcpy(&patchBytes[6], &shellAddr, sizeof(shellAddr));
+      memcpy((void*)patchAddr, patchBytes, stolenLen);
+
+      VirtualProtect((void*)patchAddr, stolenLen, oldProtect, &oldProtect);
+      FlushInstructionCache(GetCurrentProcess(), (void*)patchAddr, stolenLen);
+
+      return true;
+   }
 } // namespace
 
 struct DyingLightDeviceData final : public GameDeviceData
 {
+   ::uint32_t r8_rt_upgrade_count = 0;  // creation-order counter for R8G8B8A8_TYPELESS RTs
+
+   // Captured during the motion-vector pass (PS hash 0x923B088C, t0 = scene depth).
+   com_ptr<ID3D11Resource>           captured_depth;
+   com_ptr<ID3D11ShaderResourceView> captured_depth_srv;
 };
 
 class DyingLightGame final : public Game
@@ -164,6 +275,25 @@ class DyingLightGame final : public Game
    }
 
 public:
+   bool FilterUpgradeResource(const reshade::api::resource_desc& desc, DeviceData& device_data, bool has_initial_data) override
+   {
+      auto& gdd = GetGameDeviceData(device_data);
+
+      if (desc.texture.format == reshade::api::format::r8g8b8a8_typeless
+          && (desc.usage & reshade::api::resource_usage::render_target) != reshade::api::resource_usage::undefined)
+      {
+         // 256x1 LUT — always upgrade, no index needed
+         if (desc.texture.width == 256 && desc.texture.height == 1)
+            return true;
+
+         // TAA History: allow only creation indices 2, 3, 4 (0-based)
+         ::uint32_t idx = gdd.r8_rt_upgrade_count++;
+         return idx == 2 || idx == 3 || idx == 4;
+      }
+
+      return true;
+   }
+
    void OnInit(bool async) override
    {
       luma_settings_cbuffer_index = 13;
@@ -174,6 +304,10 @@ public:
          "Set Anti-Aliasing > On "
          "in the game's Video options for DLAA to engage.";
 #endif
+
+      GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('1');
+      GetShaderDefineData(GAMMA_CORRECTION_TYPE_HASH).SetDefaultValue('0');
+      GetShaderDefineData(UI_DRAW_TYPE_HASH).SetDefaultValue('2');
    }
 
    void OnCreateDevice(ID3D11Device* native_device, DeviceData& device_data) override
@@ -213,6 +347,25 @@ public:
       bool&                                            updated_cbuffers,
       std::function<void()>*                           original_draw_dispatch_func) override
    {
+      auto& gdd = GetGameDeviceData(device_data);
+
+      // The motion-vector pass (PS 0x923B088C) has the depth buffer in t0
+      if (original_shader_hashes.Contains(shader_hashes_MV))
+      {
+         com_ptr<ID3D11ShaderResourceView> mv_srv;
+         native_device_context->PSGetShaderResources(0, 1, &mv_srv);
+         if (mv_srv)
+         {
+            com_ptr<ID3D11Resource> res;
+            mv_srv->GetResource(&res);
+            if (res)
+            {
+               gdd.captured_depth     = res;
+               gdd.captured_depth_srv = mv_srv;
+            }
+         }
+      }
+
       if (original_shader_hashes.Contains(shader_hashes_TAA))
       {
          has_drawn_taa      = true;
@@ -259,11 +412,11 @@ public:
                settings.output_height                 = unsigned int(device_data.output_resolution.y + 0.5f);
                settings.render_width                  = unsigned int(device_data.render_resolution.x + 0.5f);
                settings.render_height                 = unsigned int(device_data.render_resolution.y + 0.5f);
-               settings.hdr                           = false;
-               settings.inverted_depth                = false;
-               settings.mvs_jittered                  = false;
+               settings.hdr                           = true;
+               settings.inverted_depth                = true;
+               settings.mvs_jittered                  = true;
                settings.auto_exposure                 = device_data.sr_type != SR::Type::FSR;
-               // Motion vectors are UV space (?) so scale to pixel space
+               // Motion vectors are UV space so scale to pixel space
                settings.mvs_x_scale                   = -device_data.render_resolution.x;
                settings.mvs_y_scale                   = -device_data.render_resolution.y;
                settings.render_preset                 = dlss_render_preset;
@@ -312,9 +465,9 @@ public:
                   com_ptr<ID3D11Resource> sr_source_color, motion_vectors;
                   ps_srvs[1]->GetResource(&sr_source_color);  // t1: scene color
                   ps_srvs[0]->GetResource(&motion_vectors);   // t0: motion vectors
-                  ASSERT_ONCE(sr_source_color && motion_vectors);
+                  ASSERT_ONCE(sr_source_color && motion_vectors && gdd.captured_depth);
 
-                  depth = sr_source_color;
+                  depth = gdd.captured_depth;
 
                   bool reset_sr              = device_data.force_reset_sr || sr_output_changed;
                   device_data.force_reset_sr = false;
@@ -328,6 +481,17 @@ public:
                   {
                      near_plane = cam->zNear;
                      far_plane  = cam->zFar;
+                  }
+
+                  prev_frame_jitters = frame_jitters;
+                  if (g_pixel_jitter_x != 0.f || g_pixel_jitter_y != 0.f)
+                  {
+                     frame_jitters.x = g_pixel_jitter_x;
+                     frame_jitters.y = -g_pixel_jitter_y;
+                  }
+                  else
+                  {
+                     frame_jitters = float2{0.f, 0.f};
                   }
 
                   SR::SuperResolutionImpl::DrawData draw_data = {};
@@ -377,7 +541,7 @@ public:
                if (dlss_output_supports_uav)
                   device_data.sr_output_color = nullptr;
             }
-            return DrawOrDispatchOverrideType::None;
+            return DrawOrDispatchOverrideType::Skip;
          }
 #endif // ENABLE_SR
       }
@@ -385,9 +549,8 @@ public:
       return DrawOrDispatchOverrideType::None;
    }
 
- void UpdateLumaInstanceDataCB(CB::LumaInstanceDataPadded& data, CommandListData& cmd_list_data, DeviceData& device_data) override
+   void UpdateLumaInstanceDataCB(CB::LumaInstanceDataPadded& data, CommandListData& cmd_list_data, DeviceData& device_data) override
    {
-
       float2 curr = frame_jitters;
       curr.x /= device_data.render_resolution.x;
       curr.y /= device_data.render_resolution.y;
@@ -397,6 +560,14 @@ public:
       prev.x /= device_data.render_resolution.x;
       prev.y /= device_data.render_resolution.y;
       memcpy(&data.GameData.PrevJitters, &prev, sizeof(prev));
+
+      float4 res;
+      res.x = device_data.render_resolution.x;
+      res.y = device_data.render_resolution.y;
+      res.z = 1.0f / device_data.render_resolution.x;
+      res.w = 1.0f / device_data.render_resolution.y;
+      memcpy(&data.GameData.RenderResolution, &res, sizeof(res));
+
    }
 
    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
@@ -433,6 +604,12 @@ public:
       device_data.has_drawn_sr                   = false;
       has_drawn_taa                              = false;
 
+      // The captured depth and its SRV are only valid for the frame they were grabbed in; release
+      // both so we don't hold a stale reference into a resource the engine may resize/destroy.
+      auto& gdd_present = GetGameDeviceData(device_data);
+      gdd_present.captured_depth     = nullptr;
+      gdd_present.captured_depth_srv = nullptr;
+
 #if ENABLE_SR
       if (!custom_texture_mip_lod_bias_offset)
       {
@@ -444,79 +621,21 @@ public:
       }
 #endif
 
-      prev_frame_jitters = frame_jitters;
-      if (device_data.taa_detected
-         && device_data.sr_type != SR::Type::None
-         && !device_data.sr_suppressed)
+      // frame_jitters is owned by OnDrawOrDispatch (read fresh from the projection
+      // matrix every TAA pass). Just keep prev in sync for Luma's CB.
+      if (!(device_data.taa_detected
+            && device_data.sr_type != SR::Type::None
+            && !device_data.sr_suppressed))
       {
-         const ::uint32_t next_frame = (cb_luma_global_settings.FrameIndex + 1) % 8;
-         frame_jitters.x = SR::HaltonSequence(next_frame, 2);
-         frame_jitters.y = SR::HaltonSequence(next_frame, 3);
+         frame_jitters      = float2{0.f, 0.f};
+         prev_frame_jitters = float2{0.f, 0.f};
       }
-      else
-      {
-         frame_jitters = float2{0.f, 0.f};
-      }
-
-      // only patch the jitter when dlaa is active
-      if (device_data.sr_type != SR::Type::None && !device_data.sr_suppressed)
-         PatchJitterTable();
-      else
-         RestoreJitterTable();
    }
 
    void DrawImGuiSettings(DeviceData& device_data) override
    {
       reshade::api::effect_runtime* runtime = nullptr;
 
-      ImGui::NewLine();
-
-      if (swapchain_format_upgrade_type > TextureFormatUpgradesType::None)
-      {
-         if (swapchain_format_upgrade_type == TextureFormatUpgradesType::AllowedEnabled ? ImGui::Button("Disable Swapchain Upgrade") : ImGui::Button("Enable Swapchain Upgrade"))
-         {
-            swapchain_format_upgrade_type = swapchain_format_upgrade_type == TextureFormatUpgradesType::AllowedEnabled ? TextureFormatUpgradesType::AllowedDisabled : TextureFormatUpgradesType::AllowedEnabled;
-         }
-      }
-      if (texture_format_upgrades_type > TextureFormatUpgradesType::None)
-      {
-         if (texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled ? ImGui::Button("Disable Texture Format Upgrades") : ImGui::Button("Enable Texture Format Upgrades"))
-         {
-            texture_format_upgrades_type = texture_format_upgrades_type == TextureFormatUpgradesType::AllowedEnabled ? TextureFormatUpgradesType::AllowedDisabled : TextureFormatUpgradesType::AllowedEnabled;
-         }
-
-         ImGui::NewLine();
-         ImGui::Text("Texture Format Upgrades:");
-         for (auto toggleable_texture_upgrade_format : toggleable_texture_upgrade_formats)
-         {
-            // Dumb stream conversion
-            std::ostringstream oss;
-            oss << toggleable_texture_upgrade_format;
-            std::string toggleable_texture_upgrade_format_name = oss.str();
-
-            bool enabled = texture_upgrade_formats.contains(toggleable_texture_upgrade_format);
-
-            int mode = enabled ? 1 : 0;
-            const char* settings_name_strings[2] = { "Off", "On" };
-            if (ImGui::SliderInt(toggleable_texture_upgrade_format_name.c_str(), &mode, 0, 1, settings_name_strings[mode], ImGuiSliderFlags_NoInput))
-            {
-               if (mode >= 1)
-               {
-                  texture_upgrade_formats.emplace(toggleable_texture_upgrade_format);
-               }
-               else
-               {
-                  texture_upgrade_formats.erase(toggleable_texture_upgrade_format);
-               }
-            }
-         }
-      }
-
-      ImGui::NewLine();
-      if (prevent_fullscreen_state ? ImGui::Button("Allow Fullscreen State") : ImGui::Button("Disallow Fullscreen State"))
-      {
-         prevent_fullscreen_state = !prevent_fullscreen_state;
-      }
    }
 
    void PrintImGuiAbout() override
@@ -538,25 +657,26 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       Globals::SetGlobals(game_name, mod_description.c_str(), "https://github.com/Filoppi/Luma-Framework/", mod_version);
 
       InitCameraHook();
+      InitJitterHook();
 
-      //swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
-      //swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
-      //texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
+      swapchain_format_upgrade_type = TextureFormatUpgradesType::AllowedEnabled;
+      swapchain_upgrade_type = SwapchainUpgradeType::scRGB;
+      texture_format_upgrades_type = TextureFormatUpgradesType::AllowedEnabled;
 
-      // ### Check which of these are needed and remove the rest ###
       texture_upgrade_formats = {
-        // reshade::api::format::r8g8b8a8_unorm,
-        // reshade::api::format::r8g8b8a8_unorm_srgb,
-        // reshade::api::format::r8g8b8a8_typeless,
-        // reshade::api::format::r11g11b10_float,
+        reshade::api::format::r8g8b8a8_typeless,
       };
-      //texture_format_upgrades_lut_size = 256;
-      //texture_format_upgrades_lut_dimensions = LUTDimensions::_1D;
-      texture_format_upgrades_2d_size_filters = 0 | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio;
 
+      texture_format_upgrades_2d_size_filters = 0
+    | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainResolution
+    | (uint32_t)TextureFormatUpgrades2DSizeFilters::SwapchainAspectRatio
+    | (uint32_t)TextureFormatUpgrades2DSizeFilters::No1Px;
+      
       enable_samplers_upgrade = true;
 
       shader_hashes_TAA.pixel_shaders = { 0xA67ABF78 };
+      shader_hashes_MV.pixel_shaders  = { 0x923B088C };
+
 
       game = new DyingLightGame();
    }
@@ -566,6 +686,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
       {
          VirtualFree(cam_hook_memory, 0, MEM_RELEASE);
          cam_hook_memory = nullptr;
+      }
+      if (jitter_hook_memory)
+      {
+         VirtualFree(jitter_hook_memory, 0, MEM_RELEASE);
+         jitter_hook_memory = nullptr;
       }
    }
 

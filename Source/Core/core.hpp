@@ -7380,6 +7380,11 @@ namespace
       
       if (std::optional<reshade::api::format> upgraded_format = ShouldUpgradeResource(desc, device_data, initial_data && initial_data->data))
       {
+         if (!game->FilterUpgradeResource(desc, device_data, initial_data && initial_data->data))
+         {
+            return false;
+         }
+
          lock.unlock();
 
          const reshade::api::resource_desc original_desc = desc;
